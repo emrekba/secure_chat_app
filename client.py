@@ -1,669 +1,364 @@
 """
 Secure Chat Client
-Modern GUI arayüzlü client uygulaması
+Simplified Single-Window Implementation
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import socket
 import threading
 import json
+import queue
+import time
 import os
-from datetime import datetime
-from steganography import embed_password, save_embedded_image, load_image_to_array
+from steganography import embed_password, save_embedded_image
 from crypto import encrypt_message, decrypt_message
-
-
-class ChatWindow:
-    """Her kullanıcı için ayrı mesaj penceresi"""
-    def __init__(self, parent, client, receiver_username):
-        self.parent = parent
-        self.client = client
-        self.receiver_username = receiver_username
-        
-        # Pencere oluştur
-        self.window = tk.Toplevel(parent)
-        self.window.title(f"Chat - {receiver_username}")
-        self.window.geometry("600x500")
-        
-        # Mesaj geçmişi dosyası
-        self.history_dir = "chat_history"
-        if not os.path.exists(self.history_dir):
-            os.makedirs(self.history_dir)
-        self.history_file = os.path.join(self.history_dir, f"{client.username}_{receiver_username}.json")
-        
-        self.setup_ui()
-        self.load_history()
-    
-    def setup_ui(self):
-        """Pencere arayüzünü oluştur"""
-        # Ana frame
-        main_frame = ttk.Frame(self.window, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Başlık
-        title_frame = ttk.Frame(main_frame)
-        title_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(title_frame, text=f"💬 {self.receiver_username}", font=("Arial", 14, "bold")).pack(side=tk.LEFT)
-        
-        # Mesaj görüntüleme alanı
-        messages_frame = ttk.Frame(main_frame)
-        messages_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        self.messages_display = scrolledtext.ScrolledText(
-            messages_frame, 
-            width=60, 
-            height=20, 
-            state="disabled",
-            wrap=tk.WORD,
-            font=("Arial", 10)
-        )
-        self.messages_display.pack(fill=tk.BOTH, expand=True)
-        
-        # Mesaj gönderme alanı
-        send_frame = ttk.Frame(main_frame)
-        send_frame.pack(fill=tk.X)
-        
-        self.message_entry = ttk.Entry(send_frame, font=("Arial", 11))
-        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        self.message_entry.bind("<Return>", lambda e: self.send_message())
-        
-        send_btn = ttk.Button(send_frame, text="Gönder", command=self.send_message)
-        send_btn.pack(side=tk.RIGHT)
-        
-        # Pencere kapatıldığında
-        self.window.protocol("WM_DELETE_WINDOW", self.on_close)
-    
-    def send_message(self):
-        """Mesaj gönder"""
-        message = self.message_entry.get().strip()
-        if not message:
-            return
-        
-        if not self.client.username:
-            messagebox.showerror("Hata", "Önce giriş yapın!")
-            return
-        
-        try:
-            # Mesajı DES ile şifrele
-            encrypted_message = encrypt_message(message, self.client.password)
-            
-            # Server'a gönder
-            self.client.send_data("SEND_MESSAGE")
-            self.client.send_data(self.receiver_username)
-            self.client.send_data(encrypted_message)
-            
-            # Yanıtı al (timeout ile)
-            response_data = self.client.receive_data(timeout=10.0)
-            if not response_data:
-                messagebox.showerror("Hata", "Server'dan yanıt alınamadı. Mesaj gönderilemedi.")
-                return
-            response = response_data.decode('utf-8')
-            
-            if response.startswith("SUCCESS"):
-                # Mesajı ekrana ekle (sadece başarılı olduğunda)
-                self.add_message(self.client.username, message, is_sent=True)
-                self.message_entry.delete(0, tk.END)
-            else:
-                messagebox.showerror("Hata", response)
-                
-        except Exception as e:
-            messagebox.showerror("Hata", f"Mesaj gönderme hatası: {str(e)}")
-    
-    def add_message(self, sender, message, is_sent=False):
-        """Mesaj ekranına mesaj ekle"""
-        self.messages_display.config(state="normal")
-        
-        timestamp = datetime.now().strftime("%H:%M")
-        
-        if is_sent:
-            # Gönderilen mesaj (sağda)
-            self.messages_display.insert(tk.END, f"[{timestamp}] Sen: {message}\n", "sent")
-            self.messages_display.tag_config("sent", foreground="blue", justify=tk.RIGHT)
-        else:
-            # Alınan mesaj (solda)
-            self.messages_display.insert(tk.END, f"[{timestamp}] {sender}: {message}\n", "received")
-            self.messages_display.tag_config("received", foreground="green", justify=tk.LEFT)
-        
-        self.messages_display.see(tk.END)
-        self.messages_display.config(state="disabled")
-        
-        # Geçmişe kaydet
-        self.save_message(sender, message, is_sent)
-    
-    def save_message(self, sender, message, is_sent):
-        """Mesajı geçmişe kaydet"""
-        try:
-            # Mevcut geçmişi yükle
-            if os.path.exists(self.history_file):
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-            else:
-                history = []
-            
-            # Yeni mesajı ekle
-            history.append({
-                'sender': sender,
-                'message': message,
-                'is_sent': is_sent,
-                'timestamp': datetime.now().isoformat()
-            })
-            
-            # Kaydet
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Geçmiş kaydetme hatası: {e}")
-    
-    def load_history(self):
-        """Mesaj geçmişini yükle"""
-        try:
-            if os.path.exists(self.history_file):
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-                
-                for msg in history:
-                    sender = msg['sender']
-                    message = msg['message']
-                    is_sent = msg.get('is_sent', False)
-                    
-                    # Timestamp'i parse et
-                    try:
-                        timestamp = datetime.fromisoformat(msg.get('timestamp', ''))
-                        time_str = timestamp.strftime("%H:%M")
-                    except:
-                        time_str = "??:??"
-                    
-                    self.messages_display.config(state="normal")
-                    if is_sent:
-                        self.messages_display.insert(tk.END, f"[{time_str}] Sen: {message}\n", "sent")
-                    else:
-                        self.messages_display.insert(tk.END, f"[{time_str}] {sender}: {message}\n", "received")
-                    self.messages_display.config(state="disabled")
-                
-                self.messages_display.see(tk.END)
-        except Exception as e:
-            print(f"Geçmiş yükleme hatası: {e}")
-    
-    def on_close(self):
-        """Pencere kapatıldığında"""
-        # Client'tan bu pencereyi kaldır
-        if self.receiver_username in self.client.chat_windows:
-            del self.client.chat_windows[self.receiver_username]
-        self.window.destroy()
-
 
 class ChatClient:
     def __init__(self, root):
         self.root = root
-        self.root.title("Güvenli Chat Uygulaması")
-        self.root.geometry("400x600")
+        self.root.title("Secure Chat")
+        self.root.geometry("800x600")
         
+        # State
         self.socket = None
         self.username = None
         self.password = None
         self.connected = False
-        
-        # Açık chat pencereleri
-        self.chat_windows = {}
-        
-        # Socket işlemleri için lock
-        self.socket_lock = threading.Lock()
-        
-        # Server bilgileri
-        self.server_host = "localhost"
-        self.server_port = 8888
+        self.msg_queue = queue.Queue()
+        self.selected_user = None
+        self.chat_history = {} # {username: ["msg1", "msg2", ...]}
         
         self.setup_ui()
-        self.start_message_listener()
-        
-        # Pencere kapatıldığında temizlik yap
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
+        self.root.after(100, self.process_queue)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
     def setup_ui(self):
-        """Arayüzü oluştur"""
-        # Ana frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # 1. Connection Bar (Top)
+        conn_frame = ttk.Frame(self.root, padding=5)
+        conn_frame.pack(fill=tk.X)
         
-        # Bağlantı frame
-        connection_frame = ttk.LabelFrame(main_frame, text="Bağlantı", padding="5")
-        connection_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        server_frame = ttk.Frame(connection_frame)
-        server_frame.pack(fill=tk.X)
-        
-        ttk.Label(server_frame, text="Server:").pack(side=tk.LEFT, padx=5)
-        self.server_entry = ttk.Entry(server_frame, width=15)
-        self.server_entry.insert(0, f"{self.server_host}:{self.server_port}")
+        ttk.Label(conn_frame, text="Server:").pack(side=tk.LEFT)
+        self.server_entry = ttk.Entry(conn_frame, width=20)
+        self.server_entry.insert(0, "localhost:8888")
         self.server_entry.pack(side=tk.LEFT, padx=5)
         
-        self.connect_btn = ttk.Button(server_frame, text="Bağlan", command=self.connect_to_server)
-        self.connect_btn.pack(side=tk.LEFT, padx=5)
+        self.connect_btn = ttk.Button(conn_frame, text="Connect", command=self.connect_server)
+        self.connect_btn.pack(side=tk.LEFT)
         
-        self.status_label = ttk.Label(connection_frame, text="Bağlantı yok", foreground="red")
-        self.status_label.pack(pady=5)
+        self.status_lbl = ttk.Label(conn_frame, text="Disconnected", foreground="red")
+        self.status_lbl.pack(side=tk.LEFT, padx=10)
+
+        # 2. Main Area (Split: Login/Register VS Chat)
+        self.main_container = ttk.Frame(self.root)
+        self.main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Giriş/Kayıt notebook
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        # We use a frame switching mechanism
+        self.auth_frame = ttk.Frame(self.main_container)
+        self.chat_frame = ttk.Frame(self.main_container)
         
-        # Login tab
-        login_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(login_frame, text="Giriş Yap")
-        self.setup_login_tab(login_frame)
+        self.setup_auth_ui()
+        self.setup_chat_ui()
         
-        # Register tab
-        register_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(register_frame, text="Kayıt Ol")
-        self.setup_register_tab(register_frame)
+        self.show_auth()
+
+    def setup_auth_ui(self):
+        # Notebook for Login / Register
+        nb = ttk.Notebook(self.auth_frame)
+        nb.pack(expand=True, fill=tk.BOTH)
         
-        # Chat tab (başlangıçta gizli)
-        self.chat_frame = ttk.Frame(self.notebook, padding="10")
-        self.setup_chat_tab(self.chat_frame)
-    
-    def setup_login_tab(self, parent):
-        """Giriş sekmesi"""
-        ttk.Label(parent, text="Kullanıcı Adı:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.login_username = ttk.Entry(parent, width=30)
-        self.login_username.grid(row=0, column=1, pady=5, padx=5)
+        # Login
+        f_login = ttk.Frame(nb, padding=20)
+        nb.add(f_login, text="Login")
         
-        ttk.Label(parent, text="Şifre:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.login_password = ttk.Entry(parent, width=30, show="*")
-        self.login_password.grid(row=1, column=1, pady=5, padx=5)
+        ttk.Label(f_login, text="Username:").pack(pady=5)
+        self.login_user = ttk.Entry(f_login)
+        self.login_user.pack(pady=5)
         
-        ttk.Button(parent, text="Giriş Yap", command=self.login).grid(row=2, column=0, columnspan=2, pady=10)
-    
-    def setup_register_tab(self, parent):
-        """Kayıt sekmesi"""
-        ttk.Label(parent, text="Kullanıcı Adı:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.register_username = ttk.Entry(parent, width=30)
-        self.register_username.grid(row=0, column=1, pady=5, padx=5)
+        ttk.Label(f_login, text="Password:").pack(pady=5)
+        self.login_pass = ttk.Entry(f_login, show="*")
+        self.login_pass.pack(pady=5)
         
-        ttk.Label(parent, text="Şifre:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.register_password = ttk.Entry(parent, width=30, show="*")
-        self.register_password.grid(row=1, column=1, pady=5, padx=5)
+        ttk.Button(f_login, text="Login", command=self.login).pack(pady=20)
         
-        ttk.Label(parent, text="Fotoğraf:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.photo_path = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.photo_path, width=25, state="readonly").grid(row=2, column=1, pady=5, padx=5, sticky=(tk.W, tk.E))
-        ttk.Button(parent, text="Seç", command=self.select_photo).grid(row=2, column=2, padx=5)
+        # Register
+        f_reg = ttk.Frame(nb, padding=20)
+        nb.add(f_reg, text="Register")
         
-        ttk.Button(parent, text="Kayıt Ol", command=self.register).grid(row=3, column=0, columnspan=3, pady=10)
-    
-    def setup_chat_tab(self, parent):
-        """Chat sekmesi - Kullanıcı listesi"""
-        # Kullanıcı listesi
-        users_frame = ttk.LabelFrame(parent, text="Kullanıcılar", padding="5")
-        users_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f_reg, text="Username:").pack(pady=5)
+        self.reg_user = ttk.Entry(f_reg)
+        self.reg_user.pack(pady=5)
         
-        # Scrollbar ile listbox
-        listbox_frame = ttk.Frame(users_frame)
-        listbox_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f_reg, text="Password:").pack(pady=5)
+        self.reg_pass = ttk.Entry(f_reg, show="*")
+        self.reg_pass.pack(pady=5)
         
-        scrollbar = ttk.Scrollbar(listbox_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Label(f_reg, text="Security Photo:").pack(pady=5)
+        self.photo_path_var = tk.StringVar()
+        ttk.Entry(f_reg, textvariable=self.photo_path_var, state='readonly').pack(pady=5)
+        ttk.Button(f_reg, text="Choose Photo", command=self.choose_photo).pack(pady=5)
         
-        self.users_listbox = tk.Listbox(
-            listbox_frame, 
-            width=30, 
-            height=20,
-            yscrollcommand=scrollbar.set,
-            font=("Arial", 11)
-        )
-        self.users_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.users_listbox.yview)
+        ttk.Button(f_reg, text="Register", command=self.register).pack(pady=20)
+
+    def setup_chat_ui(self):
+        # Paned Window: Users (Left) | Chat (Right)
+        paned = ttk.PanedWindow(self.chat_frame, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
         
-        # Çift tıklama ile mesaj penceresi aç
-        self.users_listbox.bind("<Double-Button-1>", self.on_user_double_click)
+        # Users List
+        f_users = ttk.LabelFrame(paned, text="Users", padding=5)
+        paned.add(f_users, weight=1)
         
-        # Yenile butonu
-        ttk.Button(users_frame, text="🔄 Yenile", command=self.refresh_users).pack(pady=5)
-    
-    def on_user_double_click(self, event):
-        """Kullanıcıya çift tıklandığında mesaj penceresi aç"""
-        selection = self.users_listbox.curselection()
-        if not selection:
-            return
+        self.user_list = tk.Listbox(f_users)
+        self.user_list.pack(fill=tk.BOTH, expand=True)
+        self.user_list.bind('<<ListboxSelect>>', self.on_user_select)
         
-        selected_text = self.users_listbox.get(selection[0])
-        # "🟢 username" veya "🔴 username" formatından username'i çıkar
-        username = selected_text.split(" ", 1)[1] if " " in selected_text else selected_text
+        ttk.Button(f_users, text="Refresh", command=self.refresh_users).pack(fill=tk.X, pady=5)
         
-        # Kendi kullanıcı adını atla
-        if username == self.username:
-            return
+        # Chat Area
+        f_chat = ttk.LabelFrame(paned, text="Chat", padding=5)
+        paned.add(f_chat, weight=3)
         
-        # Eğer pencere zaten açıksa, öne getir
-        if username in self.chat_windows:
-            self.chat_windows[username].window.lift()
-            self.chat_windows[username].window.focus()
-        else:
-            # Yeni pencere aç
-            chat_window = ChatWindow(self.root, self, username)
-            self.chat_windows[username] = chat_window
-    
-    def select_photo(self):
-        """Fotoğraf seç"""
-        filename = filedialog.askopenfilename(
-            title="Fotoğraf Seç",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")]
-        )
-        if filename:
-            self.photo_path.set(filename)
-    
-    def connect_to_server(self):
-        """Server'a bağlan"""
+        self.chat_display = scrolledtext.ScrolledText(f_chat, state='disabled')
+        self.chat_display.pack(fill=tk.BOTH, expand=True)
+        
+        f_input = ttk.Frame(f_chat)
+        f_input.pack(fill=tk.X, pady=5)
+        
+        self.msg_entry = ttk.Entry(f_input)
+        self.msg_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.msg_entry.bind('<Return>', lambda e: self.send_message())
+        
+        ttk.Button(f_input, text="Send", command=self.send_message).pack(side=tk.LEFT, padx=5)
+
+    def show_auth(self):
+        self.chat_frame.pack_forget()
+        self.auth_frame.pack(fill=tk.BOTH, expand=True)
+
+    def show_chat(self):
+        self.auth_frame.pack_forget()
+        self.chat_frame.pack(fill=tk.BOTH, expand=True)
+
+    def connect_server(self):
+        if self.connected: return
+        
+        addr = self.server_entry.get().split(':')
+        host = addr[0]
+        port = int(addr[1]) if len(addr) > 1 else 8888
+        
         try:
-            server_info = self.server_entry.get().split(":")
-            host = server_info[0]
-            port = int(server_info[1])
-            
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((host, port))
             self.connected = True
-            self.status_label.config(text="Bağlı", foreground="green")
-            messagebox.showinfo("Başarılı", "Server'a bağlanıldı!")
+            
+            # Start listener thread
+            threading.Thread(target=self.network_listener, daemon=True).start()
+            
+            self.status_lbl.config(text="Connected", foreground="green")
+            self.connect_btn.config(state='disabled')
+            
         except Exception as e:
-            messagebox.showerror("Hata", f"Bağlantı hatası: {str(e)}")
-            self.status_label.config(text="Bağlantı yok", foreground="red")
-    
-    def send_data(self, data):
-        """Server'a veri gönder (thread-safe)"""
-        with self.socket_lock:
-            if isinstance(data, str):
-                data = data.encode('utf-8')
-            length = len(data).to_bytes(4, 'big')
-            self.socket.sendall(length + data)
-    
-    def receive_data(self, timeout=5.0):
-        """Server'dan veri al (thread-safe)"""
-        with self.socket_lock:
+            messagebox.showerror("Connection Error", str(e))
+
+    def network_listener(self):
+        while self.connected:
             try:
-                # Timeout ayarla
-                old_timeout = self.socket.gettimeout()
-                self.socket.settimeout(timeout)
-                
+                # Read length
                 length_bytes = self.socket.recv(4)
-                if not length_bytes or len(length_bytes) < 4:
-                    self.socket.settimeout(old_timeout)
-                    return None
-                
+                if not length_bytes: break
                 length = int.from_bytes(length_bytes, 'big')
+                
+                # Read data
                 data = b''
                 while len(data) < length:
                     chunk = self.socket.recv(length - len(data))
-                    if not chunk:
-                        self.socket.settimeout(old_timeout)
-                        return None
+                    if not chunk: break
                     data += chunk
                 
-                # Timeout'u geri al
-                self.socket.settimeout(old_timeout)
-                return data
-            except socket.timeout:
-                print("Socket timeout: Server'dan yanıt alınamadı")
-                return None
+                if not data: break
+                
+                # Parse JSON
+                msg = json.loads(data.decode('utf-8'))
+                self.msg_queue.put(msg)
+                
             except Exception as e:
-                print(f"receive_data hatası: {e}")
-                return None
-    
-    def register(self):
-        """Kullanıcı kaydı"""
-        if not self.connected:
-            messagebox.showerror("Hata", "Önce server'a bağlanın!")
-            return
+                print(f"Network error: {e}")
+                self.msg_queue.put({'type': 'DISCONNECT', 'reason': str(e)})
+                break
         
-        username = self.register_username.get().strip()
-        password = self.register_password.get()
-        photo_file = self.photo_path.get()
-        
-        if not all([username, password, photo_file]):
-            messagebox.showerror("Hata", "Tüm alanları doldurun!")
-            return
-        
-        # Username'deki boşlukları temizle
-        username = username.replace(" ", "_")
-        
-        try:
-            # LSB steganografi ile password'u fotoğrafa göm
-            embedded_array = embed_password(photo_file, password)
-            
-            # Geçici dosyalara kaydet
-            temp_dir = "temp"
-            if not os.path.exists(temp_dir):
-                os.makedirs(temp_dir)
-            
-            embedded_photo_path = os.path.join(temp_dir, f"{username}_embedded.png")
-            save_embedded_image(embedded_array, embedded_photo_path)
-            
-            # Server'a gönder
-            self.send_data("REGISTER")
-            self.send_data(username)
-            
-            # Normal fotoğrafı gönder
-            with open(photo_file, 'rb') as f:
-                photo_data = f.read()
-            self.send_data(photo_data)
-            
-            # Gömülü fotoğrafı gönder
-            with open(embedded_photo_path, 'rb') as f:
-                embedded_data = f.read()
-            self.send_data(embedded_data)
-            
-            # Yanıtı al
-            response_data = self.receive_data()
-            if not response_data:
-                messagebox.showerror("Hata", "Server'dan yanıt alınamadı")
-                return
-            response = response_data.decode('utf-8')
-            
-            if response.startswith("SUCCESS"):
-                messagebox.showinfo("Başarılı", "Kayıt başarılı! Giriş yapabilirsiniz.")
-                self.register_username.delete(0, tk.END)
-                self.register_password.delete(0, tk.END)
-                self.photo_path.set("")
-            else:
-                messagebox.showerror("Hata", response)
-            
-            # Geçici dosyayı sil
-            if os.path.exists(embedded_photo_path):
-                os.remove(embedded_photo_path)
-                
-        except Exception as e:
-            messagebox.showerror("Hata", f"Kayıt hatası: {str(e)}")
-    
-    def login(self):
-        """Kullanıcı girişi"""
-        if not self.connected:
-            messagebox.showerror("Hata", "Önce server'a bağlanın!")
-            return
-        
-        username = self.login_username.get().strip()
-        password = self.login_password.get()
-        
-        if not username or not password:
-            messagebox.showerror("Hata", "Kullanıcı adı ve şifre girin!")
-            return
-        
-        # Username'deki boşlukları temizle
-        username = username.replace(" ", "_")
-        
-        try:
-            self.send_data("LOGIN")
-            self.send_data(username)
-            self.send_data(password)
-            
-            response_data = self.receive_data()
-            if not response_data:
-                messagebox.showerror("Hata", "Server'dan yanıt alınamadı")
-                return
-            response = response_data.decode('utf-8')
-            
-            if response.startswith("SUCCESS"):
-                self.username = username
-                self.password = password
-                messagebox.showinfo("Başarılı", "Giriş başarılı!")
-                self.notebook.add(self.chat_frame, text="Chat")
-                self.notebook.select(2)
-                self.refresh_users()
-            else:
-                messagebox.showerror("Hata", response)
-                
-        except Exception as e:
-            messagebox.showerror("Hata", f"Giriş hatası: {str(e)}")
-    
-    def refresh_users(self):
-        """Kullanıcı listesini yenile"""
-        if not self.username:
-            return
-        
-        try:
-            self.send_data("GET_USERS")
-            users_data = self.receive_data()
-            if not users_data:
-                print("Kullanıcı listesi alınamadı")
-                return
-            users_json = users_data.decode('utf-8')
-            users = json.loads(users_json)
-            
-            self.users_listbox.delete(0, tk.END)
-            for user in users:
-                # Kendi kullanıcı adını atla
-                if user['username'] == self.username:
-                    continue
-                
-                status = "🟢" if user['online'] else "🔴"
-                self.users_listbox.insert(tk.END, f"{status} {user['username']}")
-                
-        except Exception as e:
-            print(f"Kullanıcı listesi hatası: {e}")
-    
-    def start_message_listener(self):
-        """Mesaj dinleyici thread'i başlat"""
-        def listener():
-            while True:
-                if self.socket and self.username and self.connected:
-                    try:
-                        # Non-blocking check için socket timeout ayarla
-                        if self.socket:
-                            with self.socket_lock:
-                                try:
-                                    # Listener için kısa timeout (1 saniye)
-                                    old_timeout = self.socket.gettimeout()
-                                    self.socket.settimeout(1.0)
-                                    
-                                    try:
-                                        length_bytes = self.socket.recv(4)
-                                        if not length_bytes or len(length_bytes) < 4:
-                                            self.socket.settimeout(old_timeout)
-                                            continue
-                                        
-                                        length = int.from_bytes(length_bytes, 'big')
-                                        msg_type = b''
-                                        while len(msg_type) < length:
-                                            chunk = self.socket.recv(length - len(msg_type))
-                                            if not chunk:
-                                                self.socket.settimeout(old_timeout)
-                                                break
-                                            msg_type += chunk
-                                        
-                                        self.socket.settimeout(old_timeout)
-                                        
-                                        if len(msg_type) == length:
-                                            msg_type_str = msg_type.decode('utf-8')
-                                            if msg_type_str == "MESSAGE":
-                                                # Lock içinde kalmadan devam et - receive_data zaten lock kullanıyor
-                                                sender_data = self.receive_data(timeout=2.0)
-                                                if not sender_data:
-                                                    continue
-                                                sender = sender_data.decode('utf-8')
-                                                
-                                                encrypted_message_data = self.receive_data(timeout=2.0)
-                                                if not encrypted_message_data:
-                                                    continue
-                                                encrypted_message = encrypted_message_data.decode('utf-8')
-                                                
-                                                # Mesajı çöz
-                                                try:
-                                                    decrypted_message = decrypt_message(encrypted_message, self.password)
-                                                    
-                                                    # İlgili chat penceresine ekle (closure sorununu önlemek için)
-                                                    def add_message(s=sender, m=decrypted_message):
-                                                        self.handle_received_message(s, m)
-                                                    self.root.after(0, add_message)
-                                                except Exception as e:
-                                                    print(f"Mesaj çözme hatası: {e}")
-                                    except socket.timeout:
-                                        pass
-                                    except Exception as e:
-                                        if self.socket and self.connected:
-                                            print(f"Listener hatası: {e}")
-                                except Exception as e:
-                                    if self.socket and self.connected:
-                                        print(f"Listener genel hatası: {e}")
-                    except Exception as e:
-                        if self.socket and self.connected:
-                            print(f"Listener genel hatası: {e}")
-                else:
-                    import time
-                    time.sleep(0.5)
-        
-        listener_thread = threading.Thread(target=listener, daemon=True)
-        listener_thread.start()
-    
-    def handle_received_message(self, sender, message):
-        """Gelen mesajı işle"""
-        # Eğer bu kullanıcı için pencere açıksa, oraya ekle
-        if sender in self.chat_windows:
-            self.chat_windows[sender].add_message(sender, message, is_sent=False)
-        else:
-            # Pencere açık değilse, otomatik aç
-            chat_window = ChatWindow(self.root, self, sender)
-            self.chat_windows[sender] = chat_window
-            chat_window.add_message(sender, message, is_sent=False)
-    
-    def on_closing(self):
-        """Pencere kapatıldığında temizlik yap"""
-        try:
-            # Bağlantı durumunu güncelle (listener thread'i durdurmak için)
-            self.connected = False
-            
-            # Tüm açık chat pencerelerini kapat
-            for username, chat_window in list(self.chat_windows.items()):
-                try:
-                    chat_window.window.destroy()
-                except:
-                    pass
-            
-            # Server'a logout mesajı gönder
-            if self.socket and self.username:
-                try:
-                    # Socket hala açıksa logout gönder
-                    if hasattr(self.socket, 'fileno'):
-                        try:
-                            with self.socket_lock:
-                                if self.socket:
-                                    self.send_data("LOGOUT")
-                            print("Logout mesajı gönderildi")
-                        except Exception as e:
-                            print(f"Logout gönderme hatası: {e}")
-                except:
-                    pass
-            
-            # Socket'i kapat
-            if self.socket:
-                try:
-                    self.socket.close()
-                    print("Socket kapatıldı")
-                except:
-                    pass
-            
-        except Exception as e:
-            print(f"Kapatma hatası: {e}")
-        finally:
-            # Pencereyi kapat
-            self.root.destroy()
+        self.connected = False
+        self.msg_queue.put({'type': 'DISCONNECT', 'reason': "Connection closed"})
 
+    def send_request(self, data):
+        if not self.connected:
+            messagebox.showerror("Error", "Not connected")
+            return
+        try:
+            json_str = json.dumps(data)
+            bytes_data = json_str.encode('utf-8')
+            length = len(bytes_data).to_bytes(4, 'big')
+            self.socket.sendall(length + bytes_data)
+        except Exception as e:
+            messagebox.showerror("Error", f"Send error: {e}")
+            self.connected = False
+
+    def process_queue(self):
+        try:
+            while True:
+                msg = self.msg_queue.get_nowait()
+                self.handle_message(msg)
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self.process_queue)
+
+    def handle_message(self, msg):
+        status = msg.get('status')
+        m_type = msg.get('type')
+        
+        if m_type == 'DISCONNECT':
+            self.status_lbl.config(text="Disconnected", foreground="red")
+            self.connect_btn.config(state='normal')
+            self.show_auth()
+            messagebox.showinfo("Disconnected", msg.get('reason'))
+            
+        elif m_type == 'USER_LIST':
+            self.update_user_list(msg.get('users'))
+            
+        elif m_type == 'MESSAGE':
+            sender = msg.get('sender')
+            enc_text = msg.get('message')
+            timestamp = msg.get('timestamp')
+            
+            # Decrypt
+            try:
+                dec_text = decrypt_message(enc_text, self.password)
+                self.add_chat_history(sender, f"[{timestamp}] {sender}: {dec_text}", False)
+            except Exception as e:
+                self.add_chat_history(sender, f"[{timestamp}] {sender}: [Decryption Error]", False)
+            
+            if sender == self.selected_user:
+                self.refresh_chat_display()
+
+        # Handle Responses to our actions
+        elif status == 'success':
+            print(f"Success: {msg.get('message')}")
+            # If login success
+            if msg.get('message') == 'Logged in':
+                self.show_chat()
+                self.refresh_users()
+            elif msg.get('message') == 'Registered successfully':
+                messagebox.showinfo("Success", "Registered! Please login.")
+        elif status == 'error':
+            messagebox.showerror("Server Error", msg.get('message'))
+
+    def choose_photo(self):
+        f = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
+        if f: self.photo_path_var.set(f)
+
+    def register(self):
+        u = self.reg_user.get()
+        p = self.reg_pass.get()
+        photo = self.photo_path_var.get()
+        
+        if not all([u, p, photo]):
+            messagebox.showwarning("Warning", "All fields required")
+            return
+            
+        # 1. Embed password in photo
+        try:
+            emb_arr = embed_password(photo, p)
+            temp_path = "temp_embedded.png"
+            save_embedded_image(emb_arr, temp_path)
+            
+            with open(photo, 'rb') as f: photo_data = f.read().hex()
+            with open(temp_path, 'rb') as f: emb_data = f.read().hex()
+            
+            if os.path.exists(temp_path): os.remove(temp_path)
+            
+            self.send_request({
+                'command': 'REGISTER',
+                'username': u,
+                'photo_data': photo_data,
+                'embedded_data': emb_data
+            })
+        except Exception as e:
+            messagebox.showerror("Error", f"Processing error: {e}")
+
+    def login(self):
+        u = self.login_user.get()
+        p = self.login_pass.get()
+        if not u or not p: return
+        self.username = u
+        self.password = p
+        self.send_request({'command': 'LOGIN', 'username': u, 'password': p})
+
+    def refresh_users(self):
+        self.send_request({'command': 'GET_USERS'})
+
+    def update_user_list(self, users):
+        self.user_list.delete(0, tk.END)
+        for u in users:
+            name = u['username']
+            if name == self.username: continue
+            status = "🟢" if u['online'] else "🔴"
+            self.user_list.insert(tk.END, f"{status} {name}")
+
+    def on_user_select(self, event):
+        sel = self.user_list.curselection()
+        if not sel: return
+        
+        text = self.user_list.get(sel[0])
+        username = text.split(" ")[1]
+        self.selected_user = username
+        self.refresh_chat_display()
+
+    def refresh_chat_display(self):
+        self.chat_display.config(state='normal')
+        self.chat_display.delete(1.0, tk.END)
+        
+        msgs = self.chat_history.get(self.selected_user, [])
+        for m in msgs:
+            self.chat_display.insert(tk.END, m + "\n")
+            
+        self.chat_display.see(tk.END)
+        self.chat_display.config(state='disabled')
+
+    def add_chat_history(self, other_user, text, is_self):
+        if other_user not in self.chat_history:
+            self.chat_history[other_user] = []
+        self.chat_history[other_user].append(text)
+
+    def send_message(self):
+        if not self.selected_user: return
+        text = self.msg_entry.get().strip()
+        if not text: return
+        
+        try:
+            # Encrypt
+            enc_text = encrypt_message(text, self.password)
+            
+            self.send_request({
+                'command': 'SEND_MESSAGE',
+                'target': self.selected_user,
+                'message': enc_text
+            })
+            
+            # Add to UI immediately
+            timestamp = time.strftime("%H:%M")
+            self.add_chat_history(self.selected_user, f"[{timestamp}] me: {text}", True)
+            self.refresh_chat_display()
+            self.msg_entry.delete(0, tk.END)
+            
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def on_close(self):
+        if self.connected:
+            try:
+                self.send_request({'command': 'LOGOUT'})
+            except: pass
+        self.connected = False
+        self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()

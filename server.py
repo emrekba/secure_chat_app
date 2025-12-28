@@ -1,15 +1,14 @@
 """
 Secure Chat Server
-Kullanıcı kayıt, login, mesaj yönlendirme işlemleri
+Simplified and Robust Implementation
 """
 import socket
 import threading
 import json
-import pickle
 import os
+import time
 from steganography import extract_password, load_image_to_array
 from crypto import decrypt_message, encrypt_message
-
 
 class ChatServer:
     def __init__(self, host='localhost', port=8888):
@@ -18,386 +17,274 @@ class ChatServer:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Kullanıcı veritabanı (username -> {password, photo_path, socket, online})
+        # User data: {username: {'password': ..., 'online': bool, 'socket': socket}}
+        # Note: We enforce single active login per user for simplicity
         self.users = {}
-        # Bekleyen mesajlar (username -> [messages])
-        self.pending_messages = {}
         
-        # Veri klasörü
+        # Offline messages: {username: [{'sender': ..., 'message': ...}]}
+        self.offline_messages = {}
+        
         self.data_dir = "server_data"
+        self.ensure_directories()
+        self.load_users()
+
+    def ensure_directories(self):
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
             os.makedirs(os.path.join(self.data_dir, "photos"))
             os.makedirs(os.path.join(self.data_dir, "embedded_photos"))
-        
-        # Kullanıcıları dosyadan yükle
-        self.load_users()
-    
-    def start(self):
-        """Server'ı başlat"""
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(5)
-        print(f"Server {self.host}:{self.port} adresinde dinleniyor...")
-        
-        while True:
-            client_socket, address = self.socket.accept()
-            print(f"Yeni bağlantı: {address}")
-            client_thread = threading.Thread(
-                target=self.handle_client,
-                args=(client_socket, address)
-            )
-            client_thread.daemon = True
-            client_thread.start()
-    
-    def handle_client(self, client_socket, address):
-        """Client bağlantısını yönet"""
-        try:
-            while True:
-                # Mesaj tipini al
-                msg_type = self.receive_data(client_socket)
-                if not msg_type:
-                    break
-                
-                msg_type = msg_type.decode('utf-8')
-                
-                if msg_type == "REGISTER":
-                    self.handle_register(client_socket)
-                elif msg_type == "LOGIN":
-                    self.handle_login(client_socket)
-                elif msg_type == "SEND_MESSAGE":
-                    self.handle_send_message(client_socket)
-                elif msg_type == "GET_USERS":
-                    self.handle_get_users(client_socket)
-                elif msg_type == "LOGOUT":
-                    self.handle_logout(client_socket)
-                    break
-                    
-        except Exception as e:
-            print(f"Client hatası ({address}): {e}")
-        finally:
-            client_socket.close()
-            # Kullanıcıyı offline yap
-            for username, user_data in self.users.items():
-                if user_data.get('socket') == client_socket:
-                    user_data['online'] = False
-                    user_data['socket'] = None
-                    print(f"{username} bağlantısı kesildi")
-                    break
-    
-    def receive_data(self, socket):
-        """Socket'ten veri al"""
-        try:
-            length = int.from_bytes(socket.recv(4), 'big')
-            data = b''
-            while len(data) < length:
-                chunk = socket.recv(length - len(data))
-                if not chunk:
-                    return None
-                data += chunk
-            return data
-        except:
-            return None
-    
-    def send_data(self, socket, data):
-        """Socket'e veri gönder"""
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        length = len(data).to_bytes(4, 'big')
-        socket.sendall(length + data)
-    
+
     def load_users(self):
-        """Kayıtlı kullanıcıları dosyadan yükle"""
         users_file = os.path.join(self.data_dir, "users.json")
         if os.path.exists(users_file):
             try:
                 with open(users_file, 'r') as f:
                     users_data = json.load(f)
-                    for username, user_info in users_data.items():
-                        # Gömülü fotoğraftan password'u tekrar çıkar
-                        embedded_photo_path = user_info.get('embedded_photo_path')
-                        if embedded_photo_path and os.path.exists(embedded_photo_path):
-                            try:
-                                embedded_array = load_image_to_array(embedded_photo_path)
-                                extracted_password = extract_password(embedded_array)
-                                if extracted_password:
-                                    self.users[username] = {
-                                        'password': extracted_password,
-                                        'photo_path': user_info.get('photo_path'),
-                                        'embedded_photo_path': embedded_photo_path,
-                                        'socket': None,
-                                        'online': False
-                                    }
-                                    self.pending_messages[username] = []
-                                    print(f"Kullanıcı yüklendi: {username}")
-                            except Exception as e:
-                                print(f"Kullanıcı yükleme hatası ({username}): {e}")
+                    for username, data in users_data.items():
+                        self.users[username] = {
+                            'password': self.recover_password(data.get('embedded_photo_path')),
+                            'photo_path': data.get('photo_path'),
+                            'embedded_photo_path': data.get('embedded_photo_path'),
+                            'online': False,
+                            'socket': None
+                        }
             except Exception as e:
-                print(f"Users dosyası okuma hatası: {e}")
-    
+                print(f"Error loading users: {e}")
+
+    def recover_password(self, embedded_path):
+        if embedded_path and os.path.exists(embedded_path):
+            try:
+                arr = load_image_to_array(embedded_path)
+                return extract_password(arr)
+            except:
+                return None
+        return None
+
     def save_users(self):
-        """Kullanıcıları dosyaya kaydet"""
         users_file = os.path.join(self.data_dir, "users.json")
+        data_to_save = {}
+        for username, user in self.users.items():
+            data_to_save[username] = {
+                'photo_path': user['photo_path'],
+                'embedded_photo_path': user['embedded_photo_path']
+            }
         try:
-            users_data = {}
-            for username, user_info in self.users.items():
-                users_data[username] = {
-                    'photo_path': user_info.get('photo_path'),
-                    'embedded_photo_path': user_info.get('embedded_photo_path')
-                }
             with open(users_file, 'w') as f:
-                json.dump(users_data, f, indent=2)
+                json.dump(data_to_save, f, indent=2)
         except Exception as e:
-            print(f"Users dosyası kaydetme hatası: {e}")
-    
-    def handle_register(self, client_socket):
-        """Kullanıcı kaydı"""
+            print(f"Error saving users: {e}")
+
+    def start(self):
         try:
-            # Kullanıcı bilgilerini al
-            username_data = self.receive_data(client_socket)
-            if not username_data:
-                self.send_data(client_socket, "ERROR: Kullanıcı adı alınamadı")
-                return
-            username = username_data.decode('utf-8')
-            print(f"Kayıt işlemi başlatıldı: {username}")
+            self.socket.bind((self.host, self.port))
+            self.socket.listen(5)
+            print(f"Server listening on {self.host}:{self.port}")
+            while True:
+                client_sock, addr = self.socket.accept()
+                print(f"New connection: {addr}")
+                threading.Thread(target=self.handle_client, args=(client_sock,), daemon=True).start()
+        except Exception as e:
+            print(f"Server startup error: {e}")
+        finally:
+            self.socket.close()
+
+    def send_json(self, sock, data):
+        try:
+            json_str = json.dumps(data)
+            bytes_data = json_str.encode('utf-8')
+            length = len(bytes_data).to_bytes(4, 'big')
+            sock.sendall(length + bytes_data)
+            return True
+        except:
+            return False
+
+    def recv_json(self, sock):
+        try:
+            length_bytes = sock.recv(4)
+            if not length_bytes: return None
+            length = int.from_bytes(length_bytes, 'big')
+            data = b''
+            while len(data) < length:
+                chunk = sock.recv(length - len(data))
+                if not chunk: return None
+                data += chunk
+            return json.loads(data.decode('utf-8'))
+        except:
+            return None
+
+    def handle_client(self, sock):
+        current_user = None
+        try:
+            while True:
+                req = self.recv_json(sock)
+                if not req: break
+                
+                command = req.get('command')
+                
+                if command == 'REGISTER':
+                    self.handle_register(sock, req)
+                elif command == 'LOGIN':
+                    username = self.handle_login(sock, req)
+                    if username: current_user = username
+                elif command == 'SEND_MESSAGE':
+                    self.handle_message(sock, req, current_user)
+                elif command == 'GET_USERS':
+                    self.handle_get_users(sock)
+                elif command == 'LOGOUT':
+                    break
+        except Exception as e:
+            print(f"Client error: {e}")
+        finally:
+            if current_user:
+                print(f"{current_user} disconnected")
+                if current_user in self.users:
+                    self.users[current_user]['online'] = False
+                    self.users[current_user]['socket'] = None
+            sock.close()
+
+    def handle_register(self, sock, req):
+        username = req.get('username')
+        photo_data_hex = req.get('photo_data') # Expecting hex string for binary data
+        embedded_data_hex = req.get('embedded_data')
+        
+        if username in self.users:
+            self.send_json(sock, {'status': 'error', 'message': 'Username taken'})
+            return
+
+        try:
+            # Save files
+            photo_bytes = bytes.fromhex(photo_data_hex)
+            embedded_bytes = bytes.fromhex(embedded_data_hex)
             
-            # Normal fotoğrafı al
-            photo_data = self.receive_data(client_socket)
-            if not photo_data:
-                self.send_data(client_socket, "ERROR: Fotoğraf alınamadı")
-                return
             photo_path = os.path.join(self.data_dir, "photos", f"{username}.png")
-            with open(photo_path, 'wb') as f:
-                f.write(photo_data)
-            print(f"Fotoğraf kaydedildi: {photo_path}")
+            embedded_path = os.path.join(self.data_dir, "embedded_photos", f"{username}_embedded.png")
             
-            # Gömülü fotoğrafı al
-            embedded_photo_data = self.receive_data(client_socket)
-            if not embedded_photo_data:
-                self.send_data(client_socket, "ERROR: Gömülü fotoğraf alınamadı")
+            with open(photo_path, 'wb') as f: f.write(photo_bytes)
+            with open(embedded_path, 'wb') as f: f.write(embedded_bytes)
+            
+            # Extract password
+            pwd = self.recover_password(embedded_path)
+            if not pwd:
+                self.send_json(sock, {'status': 'error', 'message': 'Could not extract password from image'})
                 return
-            embedded_photo_path = os.path.join(self.data_dir, "embedded_photos", f"{username}_embedded.png")
-            with open(embedded_photo_path, 'wb') as f:
-                f.write(embedded_photo_data)
-            print(f"Gömülü fotoğraf kaydedildi: {embedded_photo_path}")
-            
-            # Gömülü fotoğraftan password'u çıkar
-            embedded_array = load_image_to_array(embedded_photo_path)
-            extracted_password = extract_password(embedded_array)
-            print(f"Çıkarılan password: [{extracted_password}] (uzunluk: {len(extracted_password)})")
-            
-            if not extracted_password:
-                self.send_data(client_socket, "ERROR: Password çıkarılamadı")
-                return
-            
-            # Kullanıcıyı kaydet
+
             self.users[username] = {
-                'password': extracted_password,
+                'password': pwd,
                 'photo_path': photo_path,
-                'embedded_photo_path': embedded_photo_path,
-                'socket': None,
-                'online': False
+                'embedded_photo_path': embedded_path,
+                'online': False,
+                'socket': None
+            }
+            self.save_users()
+            self.send_json(sock, {'status': 'success', 'message': 'Registered successfully'})
+            print(f"Registered {username}")
+        except Exception as e:
+            self.send_json(sock, {'status': 'error', 'message': str(e)})
+
+    def handle_login(self, sock, req):
+        username = req.get('username')
+        password = req.get('password')
+        
+        if username not in self.users:
+            self.send_json(sock, {'status': 'error', 'message': 'User not found'})
+            return None
+        
+        real_pwd = self.users[username]['password']
+        if password != real_pwd:
+            self.send_json(sock, {'status': 'error', 'message': 'Invalid password'})
+            return None
+            
+        self.users[username]['online'] = True
+        self.users[username]['socket'] = sock
+        self.send_json(sock, {'status': 'success', 'message': 'Logged in'})
+        print(f"{username} logged in")
+        
+        # Send offline messages
+        if username in self.offline_messages:
+            for msg in self.offline_messages[username]:
+                # Re-encrypt for receiver is already done or done here?
+                # Better to store raw message and re-encrypt on send, OR store doubly encrypted?
+                # Simplify: The message in offline_queue is ALREADY re-encrypted for the receiver
+                # Wait, if we decrypt from sender and encrypt for receiver ON SEND, we need receiver's password.
+                # We have receiver's password in self.users.
+                # Let's see how invalid message handling:
+                # 1. Receiver online: decrypt(sender_key) -> encrypt(receiver_key) -> send
+                # 2. Receiver offline: decrypt(sender_key) -> encrypt(receiver_key) -> store
+                self.send_json(sock, {
+                    'type': 'MESSAGE',
+                    'sender': msg['sender'],
+                    'message': msg['message'],
+                    'timestamp': msg['timestamp']
+                })
+            del self.offline_messages[username]
+            
+        return username
+
+    def handle_message(self, sock, req, sender_username):
+        if not sender_username:
+            self.send_json(sock, {'status': 'error', 'message': 'Not logged in'})
+            return
+
+        target_username = req.get('target')
+        encrypted_msg = req.get('message')
+        
+        if target_username not in self.users:
+            self.send_json(sock, {'status': 'error', 'message': 'User not found'})
+            return
+
+        try:
+            # 1. Decrypt using sender's password
+            sender_pwd = self.users[sender_username]['password']
+            decrypted = decrypt_message(encrypted_msg, sender_pwd)
+            
+            # 2. Encrypt using receiver's password
+            receiver_pwd = self.users[target_username]['password']
+            re_encrypted = encrypt_message(decrypted, receiver_pwd)
+            
+            timestamp = time.strftime("%H:%M")
+            msg_payload = {
+                'type': 'MESSAGE',
+                'sender': sender_username,
+                'message': re_encrypted,
+                'timestamp': timestamp
             }
             
-            # Bekleyen mesajlar listesi oluştur
-            self.pending_messages[username] = []
-            
-            # Dosyaya kaydet
-            self.save_users()
-            
-            print(f"Yeni kullanıcı kaydedildi: {username}, Password: {extracted_password}")
-            self.send_data(client_socket, "SUCCESS: Kayıt başarılı")
-            
-        except Exception as e:
-            import traceback
-            print(f"Register hatası: {e}")
-            print(traceback.format_exc())
-            self.send_data(client_socket, f"ERROR: {str(e)}")
-    
-    def handle_login(self, client_socket):
-        """Kullanıcı girişi"""
-        try:
-            username_data = self.receive_data(client_socket)
-            if not username_data:
-                self.send_data(client_socket, "ERROR: Kullanıcı adı alınamadı")
-                return
-            username = username_data.decode('utf-8')
-            
-            password_data = self.receive_data(client_socket)
-            if not password_data:
-                self.send_data(client_socket, "ERROR: Şifre alınamadı")
-                return
-            password = password_data.decode('utf-8')
-            
-            print(f"Login denemesi: {username}, Password: {password}")
-            print(f"Mevcut kullanıcılar: {list(self.users.keys())}")
-            
-            if username not in self.users:
-                # Kullanıcıyı tekrar yükle
-                self.load_users()
-                if username not in self.users:
-                    self.send_data(client_socket, "ERROR: Kullanıcı bulunamadı")
-                    print(f"Kullanıcı bulunamadı: {username}")
-                    return
-            
-            stored_password = self.users[username]['password']
-            print(f"Kayıtlı password: [{stored_password}], Gelen password: [{password}]")
-            
-            if stored_password != password:
-                self.send_data(client_socket, "ERROR: Yanlış şifre")
-                print(f"Şifre eşleşmedi: beklenen [{stored_password}], gelen [{password}]")
-                return
-            
-            # Kullanıcıyı online yap
-            self.users[username]['online'] = True
-            self.users[username]['socket'] = client_socket
-            
-            print(f"{username} giriş yaptı")
-            self.send_data(client_socket, "SUCCESS: Giriş başarılı")
-            
-            # Bekleyen mesajları gönder
-            if username in self.pending_messages:
-                for msg in self.pending_messages[username]:
-                    self.send_message_to_user(username, msg['from'], msg['encrypted_message'])
-                self.pending_messages[username] = []
-            
-        except Exception as e:
-            print(f"Login hatası: {e}")
-            self.send_data(client_socket, f"ERROR: {str(e)}")
-    
-    def handle_send_message(self, client_socket):
-        """Mesaj gönderme"""
-        try:
-            # Gönderen kullanıcıyı bul
-            sender = None
-            for username, user_data in self.users.items():
-                if user_data.get('socket') == client_socket:
-                    sender = username
-                    break
-            
-            if not sender:
-                self.send_data(client_socket, "ERROR: Oturum açılmamış")
-                return
-            
-            # Alıcı ve mesajı al
-            receiver_data = self.receive_data(client_socket)
-            if not receiver_data:
-                self.send_data(client_socket, "ERROR: Alıcı bilgisi alınamadı")
-                return
-            receiver = receiver_data.decode('utf-8')
-            
-            encrypted_message_data = self.receive_data(client_socket)
-            if not encrypted_message_data:
-                self.send_data(client_socket, "ERROR: Mesaj alınamadı")
-                return
-            encrypted_message = encrypted_message_data.decode('utf-8')
-            
-            if receiver not in self.users:
-                self.send_data(client_socket, "ERROR: Alıcı bulunamadı")
-                return
-            
-            # Gönderenin password'u ile mesajı çöz
-            sender_password = self.users[sender]['password']
-            try:
-                decrypted_message = decrypt_message(encrypted_message, sender_password)
-            except:
-                self.send_data(client_socket, "ERROR: Mesaj çözülemedi")
-                return
-            
-            # Alıcının password'u ile mesajı şifrele
-            receiver_password = self.users[receiver]['password']
-            re_encrypted_message = encrypt_message(decrypted_message, receiver_password)
-            
-            # Mesajı gönder veya beklet
-            try:
-                if self.users[receiver]['online']:
-                    send_success = self.send_message_to_user(receiver, sender, re_encrypted_message)
-                    if send_success:
-                        self.send_data(client_socket, "SUCCESS: Mesaj gönderildi")
-                        print(f"{sender} -> {receiver}: Mesaj gönderildi")
-                    else:
-                        # Gönderilemediyse beklet
-                        self.pending_messages[receiver].append({
-                            'from': sender,
-                            'encrypted_message': re_encrypted_message
-                        })
-                        self.send_data(client_socket, "SUCCESS: Mesaj kaydedildi (alıcı bağlantısı kesildi)")
-                        print(f"{sender} -> {receiver}: Mesaj kaydedildi (alıcı bağlantısı kesildi)")
+            # 3. Send or Store
+            receiver_sock = self.users[target_username]['socket']
+            sent = False
+            if self.users[target_username]['online'] and receiver_sock:
+                if self.send_json(receiver_sock, msg_payload):
+                    sent = True
                 else:
-                    # Offline kullanıcı için mesajı beklet
-                    self.pending_messages[receiver].append({
-                        'from': sender,
-                        'encrypted_message': re_encrypted_message
-                    })
-                    self.send_data(client_socket, "SUCCESS: Mesaj kaydedildi (kullanıcı offline)")
-                    print(f"{sender} -> {receiver}: Mesaj kaydedildi (kullanıcı offline)")
-            except Exception as e:
-                print(f"Mesaj gönderme hatası: {e}")
-                self.send_data(client_socket, f"ERROR: Mesaj gönderilemedi: {str(e)}")
+                    # Socket failed, mark offline
+                    self.users[target_username]['online'] = False
+                    self.users[target_username]['socket'] = None
             
-        except Exception as e:
-            print(f"Send message hatası: {e}")
-            self.send_data(client_socket, f"ERROR: {str(e)}")
-    
-    def send_message_to_user(self, receiver, sender, encrypted_message):
-        """Kullanıcıya mesaj gönder"""
-        try:
-            receiver_socket = self.users[receiver]['socket']
-            if receiver_socket:
-                try:
-                    self.send_data(receiver_socket, "MESSAGE")
-                    self.send_data(receiver_socket, sender)
-                    self.send_data(receiver_socket, encrypted_message)
-                    return True
-                except Exception as e:
-                    print(f"Socket gönderme hatası ({receiver}): {e}")
-                    # Socket bağlantısı kesilmiş olabilir
-                    self.users[receiver]['online'] = False
-                    self.users[receiver]['socket'] = None
-                    return False
-            else:
-                print(f"Kullanıcı {receiver} socket'i yok")
-                return False
-        except Exception as e:
-            print(f"Mesaj gönderme hatası ({receiver}): {e}")
-            return False
-    
-    def handle_get_users(self, client_socket):
-        """Kullanıcı listesini gönder"""
-        try:
-            users_list = []
-            for username, user_data in self.users.items():
-                users_list.append({
-                    'username': username,
-                    'online': user_data['online']
+            if not sent:
+                if target_username not in self.offline_messages:
+                    self.offline_messages[target_username] = []
+                self.offline_messages[target_username].append({
+                    'sender': sender_username,
+                    'message': re_encrypted,
+                    'timestamp': timestamp
                 })
-            
-            users_json = json.dumps(users_list)
-            self.send_data(client_socket, users_json)
-            
+                self.send_json(sock, {'status': 'success', 'message': 'Message queued (User offline)'})
+            else:
+                self.send_json(sock, {'status': 'success', 'message': 'Message sent'})
+                
         except Exception as e:
-            print(f"Get users hatası: {e}")
-            self.send_data(client_socket, "ERROR")
-    
-    def handle_logout(self, client_socket):
-        """Kullanıcı çıkışı"""
-        for username, user_data in self.users.items():
-            if user_data.get('socket') == client_socket:
-                user_data['online'] = False
-                user_data['socket'] = None
-                print(f"{username} çıkış yaptı")
-                break
-        
-        # Socket'i kapat
-        try:
-            client_socket.close()
-        except:
-            pass
+            print(f"Message relay error: {e}")
+            self.send_json(sock, {'status': 'error', 'message': 'Encryption error'})
 
+    def handle_get_users(self, sock):
+        user_list = []
+        for uname, udata in self.users.items():
+            user_list.append({
+                'username': uname,
+                'online': udata['online']
+            })
+        self.send_json(sock, {'type': 'USER_LIST', 'users': user_list})
 
 if __name__ == "__main__":
     server = ChatServer()
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        print("\nServer kapatılıyor...")
-
+    server.start()
