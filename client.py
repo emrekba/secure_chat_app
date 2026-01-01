@@ -104,13 +104,27 @@ class ChatClient:
         paned = ttk.PanedWindow(self.chat_frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
         
-        # Users List
+        # User List Container
         f_users = ttk.LabelFrame(paned, text="Users", padding=5)
         paned.add(f_users, weight=1)
         
-        self.user_list = tk.Listbox(f_users)
-        self.user_list.pack(fill=tk.BOTH, expand=True)
-        self.user_list.bind('<<ListboxSelect>>', self.on_user_select)
+        # Canvas + Scrollbar for Custom List
+        self.users_canvas = tk.Canvas(f_users, bg='white')
+        scrollbar = ttk.Scrollbar(f_users, orient="vertical", command=self.users_canvas.yview)
+        
+        self.users_scrollable_frame = ttk.Frame(self.users_canvas)
+        self.users_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.users_canvas.configure(
+                scrollregion=self.users_canvas.bbox("all")
+            )
+        )
+        
+        self.users_canvas.create_window((0, 0), window=self.users_scrollable_frame, anchor="nw")
+        self.users_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.users_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         
         ttk.Button(f_users, text="Refresh", command=self.refresh_users).pack(fill=tk.X, pady=5)
         
@@ -296,12 +310,57 @@ class ChatClient:
         self.send_request({'command': 'GET_USERS'})
 
     def update_user_list(self, users):
-        self.user_list.delete(0, tk.END)
+        # Clear existing
+        for widget in self.users_scrollable_frame.winfo_children():
+            widget.destroy()
+            
+        import base64
+        import io
+        from PIL import Image, ImageTk
+        
+        self.user_images = [] # Keep references
+        
         for u in users:
             name = u['username']
             if name == self.username: continue
+            
+            # Create Row Frame
+            row = ttk.Frame(self.users_scrollable_frame)
+            row.pack(fill=tk.X, pady=2, padx=2)
+            
+            # --- Image ---
+            photo_data = u.get('photo_data')
+            img_item = None
+            try:
+                if photo_data:
+                    b_data = base64.b64decode(photo_data)
+                    img = Image.open(io.BytesIO(b_data))
+                    # Resize just in case
+                    img.thumbnail((40, 40))
+                    img_item = ImageTk.PhotoImage(img)
+                    self.user_images.append(img_item) # Keep ref
+            except Exception as e:
+                print(f"Img err: {e}")
+                
+            img_lbl = ttk.Label(row, image=img_item if img_item else None, text="?" if not img_item else "")
+            img_lbl.image = img_item # Keep ref
+            img_lbl.pack(side=tk.LEFT, padx=5)
+            
+            # --- Name & Status ---
             status = "🟢" if u['online'] else "🔴"
-            self.user_list.insert(tk.END, f"{status} {name}")
+            lbl = ttk.Label(row, text=f"{name} {status}", font=("Arial", 10))
+            lbl.pack(side=tk.LEFT, padx=5)
+            
+            # --- Bind Clicks ---
+            def on_click(n=name):
+                self.selected_user = n
+                self.refresh_chat_display()
+                # Visual feedback?
+                print(f"Selected {n}")
+                
+            row.bind("<Button-1>", lambda e, n=name: on_click(n))
+            img_lbl.bind("<Button-1>", lambda e, n=name: on_click(n))
+            lbl.bind("<Button-1>", lambda e, n=name: on_click(n))
 
     def on_user_select(self, event):
         sel = self.user_list.curselection()

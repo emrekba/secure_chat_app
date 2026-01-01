@@ -279,9 +279,26 @@ class ChatServer:
     def handle_get_users(self, sock):
         user_list = []
         for uname, udata in self.users.items():
+            photo_b64 = None
+            try:
+                if udata.get('photo_path') and os.path.exists(udata['photo_path']):
+                    from PIL import Image
+                    import io
+                    import base64
+                    
+                    with Image.open(udata['photo_path']) as img:
+                        # Resize to thumbnail
+                        img.thumbnail((50, 50))
+                        buffer = io.BytesIO()
+                        img.save(buffer, format="PNG")
+                        photo_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            except Exception as e:
+                print(f"Error processing image for {uname}: {e}")
+
             user_list.append({
                 'username': uname,
-                'online': udata['online']
+                'online': udata['online'],
+                'photo_data': photo_b64
             })
         self.send_json(sock, {'type': 'USER_LIST', 'users': user_list})
 
